@@ -14,7 +14,7 @@ module Concurrent
   #
   # @!macro monotonic_clock_warning
   class TimerSet
-    include RubyExecutor
+    include RubyExecutorService
     include ExecutorOptions
 
     # Create a new set of timed tasks.

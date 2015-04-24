@@ -126,7 +126,11 @@ module Concurrent
     end
   end
 
-  module RubyExecutor
+  # @!macro [attach] executor_service
+  # 
+  #   An mixin module that provides methods for controlling the lifecycle of an
+  #   executor.
+  module RubyExecutorService
     include Executor
     include Logging
 
@@ -279,7 +283,8 @@ module Concurrent
 
   if Concurrent.on_jruby?
 
-    module JavaExecutor
+    # @!macro executor_service
+    module JavaExecutorService
       include Executor
       java_import 'java.lang.Runnable'
 
@@ -352,6 +357,9 @@ module Concurrent
 
       protected
 
+      def init_executor
+      end
+
       # FIXME: it's here just for synchronization in auto_terminate methods, should be replaced and solved
       # by the synchronization layer
       def mutex
@@ -361,6 +369,18 @@ module Concurrent
       def synchronize
         JRuby.reference0(self).synchronized { yield }
       end
+    end
+  end
+
+  if Concurrent.on_jruby?
+    # @!macro executor_service
+    module ExecutorService
+      include JavaExecutorService
+    end
+  else
+    # @!macro executor_service
+    module ExecutorService
+      include RubyExecutorService
     end
   end
 end
