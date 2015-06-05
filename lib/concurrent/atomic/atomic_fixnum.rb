@@ -1,4 +1,5 @@
-require 'concurrent/native_extensions'
+require 'concurrent/utility/native_extension_loader'
+require 'concurrent/synchronization'
 
 module Concurrent
 
@@ -21,7 +22,7 @@ module Concurrent
   #         4.520000   0.030000   4.550000 (  1.187000)
   #
   #   @see http://docs.oracle.com/javase/7/docs/api/java/util/concurrent/atomic/AtomicLong.html java.util.concurrent.atomic.AtomicLong
-  class MutexAtomicFixnum
+  class MutexAtomicFixnum < Synchronization::Object
 
     # http://stackoverflow.com/questions/535721/ruby-max-integer
     MIN_VALUE = -(2**(0.size * 8 - 2))
@@ -31,12 +32,11 @@ module Concurrent
     #
     #   Creates a new `AtomicFixnum` with the given initial value.
     #
-    #   @param [Fixnum] init the initial value
+    #   @param [Fixnum] initial the initial value
     #   @raise [ArgumentError] if the initial value is not a `Fixnum`
-    def initialize(init = 0)
-      raise ArgumentError.new('initial value must be a Fixnum') unless init.is_a?(Fixnum)
-      @value = init
-      @mutex = Mutex.new
+    def initialize(initial = 0)
+      super()
+      synchronize { ns_initialize(initial) }
     end
 
     # @!macro [attach] atomic_fixnum_method_value_get
@@ -45,10 +45,7 @@ module Concurrent
     #
     #   @return [Fixnum] the current value
     def value
-      @mutex.lock
-      @value
-    ensure
-      @mutex.unlock
+      synchronize { @value }
     end
 
     # @!macro [attach] atomic_fixnum_method_value_set
@@ -61,11 +58,7 @@ module Concurrent
     #
     #   @raise [ArgumentError] if the new value is not a `Fixnum`
     def value=(value)
-      raise ArgumentError.new('value must be a Fixnum') unless value.is_a?(Fixnum)
-      @mutex.lock
-      @value = value
-    ensure
-      @mutex.unlock
+      synchronize { ns_set(value) }
     end
 
     # @!macro [attach] atomic_fixnum_method_increment
@@ -74,10 +67,7 @@ module Concurrent
     #
     #   @return [Fixnum] the current value after incrementation
     def increment
-      @mutex.lock
-      @value += 1
-    ensure
-      @mutex.unlock
+      synchronize { ns_set(@value + 1) }
     end
 
     alias_method :up, :increment
@@ -88,10 +78,7 @@ module Concurrent
     #
     #   @return [Fixnum] the current value after decrementation
     def decrement
-      @mutex.lock
-      @value -= 1
-    ensure
-      @mutex.unlock
+      synchronize { ns_set(@value -1) }
     end
 
     alias_method :down, :decrement
@@ -104,58 +91,79 @@ module Concurrent
     #   @param [Fixnum] expect the expected value
     #   @param [Fixnum] update the new value
     #
-    #   @return [Boolean] true if the value was updated else false
+    #   @return [Fixnum] true if the value was updated else false
     def compare_and_set(expect, update)
-      @mutex.lock
-      if @value == expect
-        @value = update
-        true
-      else
-        false
+      synchronize do
+        if @value == expect
+          @value = update
+          true
+        else
+          false
+        end
       end
-    ensure
-      @mutex.unlock
+    end
+
+    protected
+
+    # @!visibility private
+    def ns_initialize(initial)
+      ns_set(initial)
+    end
+
+    private
+
+    # @!visibility private
+    def ns_set(value)
+      range_check!(value)
+      @value = value
+    end
+
+    # @!visibility private
+    def range_check!(value)
+      if !value.is_a?(Fixnum)
+        raise ArgumentError.new('value value must be a Fixnum')
+      elsif value > MAX_VALUE
+        raise RangeError.new("#{value} is greater than the maximum value of #{MAX_VALUE}")
+      elsif value < MIN_VALUE
+        raise RangeError.new("#{value} is less than the maximum value of #{MIN_VALUE}")
+      else
+        value
+      end
     end
   end
 
-  if Concurrent.on_jruby?
+  AtomicFixnumImplementation = case
+                               when Concurrent.on_jruby?
+                                 JavaAtomicFixnum
+                               when defined?(CAtomicFixnum)
+                                 CAtomicFixnum
+                               else
+                                 MutexAtomicFixnum
+                               end
+  private_constant :AtomicFixnumImplementation
 
-    # @!macro atomic_fixnum
-    class AtomicFixnum < JavaAtomicFixnum
-    end
+  # @!macro atomic_fixnum
+  #
+  # @see Concurrent::MutexAtomicFixnum
+  class AtomicFixnum < AtomicFixnumImplementation
 
-  elsif defined?(CAtomicFixnum)
+    # @!method initialize(initial = 0)
+    #   @!macro atomic_fixnum_method_initialize
 
-    # @!macro atomic_fixnum
-    class CAtomicFixnum
+    # @!method value
+    #   @!macro atomic_fixnum_method_value_get
 
-      # @!method initialize
-      #   @!macro atomic_fixnum_method_initialize
+    # @!method value=(value)
+    #   @!macro atomic_fixnum_method_value_set
 
-      # @!method value
-      #   @!macro atomic_fixnum_method_value_get
+    # @!method increment
+    #   @!macro atomic_fixnum_method_increment
 
-      # @!method value=
-      #   @!macro atomic_fixnum_method_value_set
+    # @!method decrement
+    #   @!macro atomic_fixnum_method_decrement
 
-      # @!method increment
-      #   @!macro atomic_fixnum_method_increment
+    # @!method compare_and_set(expect, update)
+    #   @!macro atomic_fixnum_method_compare_and_set
 
-      # @!method decrement
-      #   @!macro atomic_fixnum_method_decrement
-
-      # @!method compare_and_set
-      #   @!macro atomic_fixnum_method_compare_and_set
-    end
-
-    # @!macro atomic_fixnum
-    class AtomicFixnum < CAtomicFixnum
-    end
-
-  else
-
-    # @!macro atomic_fixnum
-    class AtomicFixnum < MutexAtomicFixnum
-    end
   end
 end

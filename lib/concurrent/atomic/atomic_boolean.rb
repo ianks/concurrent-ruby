@@ -1,4 +1,5 @@
-require 'concurrent/native_extensions'
+require 'concurrent/utility/native_extension_loader'
+require 'concurrent/synchronization'
 
 module Concurrent
 
@@ -21,7 +22,7 @@ module Concurrent
   #         3.340000   0.010000   3.350000 (  0.855000)
   #
   #   @see http://docs.oracle.com/javase/7/docs/api/java/util/concurrent/atomic/AtomicBoolean.html java.util.concurrent.atomic.AtomicBoolean
-  class MutexAtomicBoolean
+  class MutexAtomicBoolean < Synchronization::Object
 
     # @!macro [attach] atomic_boolean_method_initialize
     #
@@ -29,8 +30,8 @@ module Concurrent
     #
     #   @param [Boolean] initial the initial value
     def initialize(initial = false)
-      @value = !!initial
-      @mutex = Mutex.new
+      super()
+      synchronize { ns_initialize(initial) }
     end
 
     # @!macro [attach] atomic_boolean_method_value_get
@@ -39,10 +40,7 @@ module Concurrent
     #
     #   @return [Boolean] the current value
     def value
-      @mutex.lock
-      @value
-    ensure
-      @mutex.unlock
+      synchronize { @value }
     end
 
     # @!macro [attach] atomic_boolean_method_value_set
@@ -53,11 +51,7 @@ module Concurrent
     #
     #   @return [Boolean] the current value
     def value=(value)
-      @mutex.lock
-      @value = !!value
-      @value
-    ensure
-      @mutex.unlock
+      synchronize { @value = !!value }
     end
 
     # @!macro [attach] atomic_boolean_method_true_question
@@ -66,22 +60,16 @@ module Concurrent
     #
     #   @return [Boolean] true if the current value is `true`, else false
     def true?
-      @mutex.lock
-      @value
-    ensure
-      @mutex.unlock
+      synchronize { @value }
     end
 
-    # @!macro atomic_boolean_method_false_question
+    # @!macro [attach] atomic_boolean_method_false_question
     #
     #   Is the current value `false`
     #
     #   @return [Boolean] true if the current value is `false`, else false
     def false?
-      @mutex.lock
-      !@value
-    ensure
-      @mutex.unlock
+      synchronize { !@value }
     end
 
     # @!macro [attach] atomic_boolean_method_make_true
@@ -90,12 +78,7 @@ module Concurrent
     #
     #   @return [Boolean] true is value has changed, otherwise false
     def make_true
-      @mutex.lock
-      old = @value
-      @value = true
-      !old
-    ensure
-      @mutex.unlock
+      synchronize { ns_make_value(true) }
     end
 
     # @!macro [attach] atomic_boolean_method_make_false
@@ -104,55 +87,59 @@ module Concurrent
     #
     #   @return [Boolean] true is value has changed, otherwise false
     def make_false
-      @mutex.lock
+      synchronize { ns_make_value(false) }
+    end
+
+    protected
+
+    # @!visibility private
+    def ns_initialize(initial)
+      @value = !!initial
+    end
+
+    # @!visibility private
+    def ns_make_value(value)
       old = @value
-      @value = false
-      old
-    ensure
-      @mutex.unlock
+      @value = value
+      old != @value
     end
   end
 
-  if Concurrent.on_jruby?
+  AtomicBooleanImplementation = case
+                                when Concurrent.on_jruby?
+                                  JavaAtomicBoolean
+                                when defined?(CAtomicBoolean)
+                                  CAtomicBoolean
+                                else
+                                  MutexAtomicBoolean
+                                end
+  private_constant :AtomicBooleanImplementation
 
-    class AtomicBoolean < JavaAtomicBoolean
-    end
+  # @!macro atomic_boolean
+  #
+  # @see Concurrent::MutexAtomicBoolean
+  class AtomicBoolean < AtomicBooleanImplementation
 
-  elsif defined?(CAtomicBoolean)
+    # @!method initialize(initial = false)
+    #   @!macro atomic_boolean_method_initialize
 
-    # @!macro atomic_boolean
-    class CAtomicBoolean
+    # @!method value
+    #   @!macro atomic_boolean_method_value_get
 
-      # @!method initialize
-      #   @!macro atomic_boolean_method_initialize
+    # @!method value=(value)
+    #   @!macro atomic_boolean_method_value_set
 
-      # @!method value
-      #   @!macro atomic_boolean_method_value_get
+    # @!method true?
+    #   @!macro atomic_boolean_method_true_question
 
-      # @!method value=
-      #   @!macro atomic_boolean_method_value_set
+    # @!method false?
+    #   @!macro atomic_boolean_method_false_question
 
-      # @!method true?
-      #   @!macro atomic_boolean_method_true_question
+    # @!method make_true
+    #   @!macro atomic_boolean_method_make_true
 
-      # @!method false?
-      #   @!macro atomic_boolean_method_false_question
+    # @!method make_false
+    #   @!macro atomic_boolean_method_make_false
 
-      # @!method make_true
-      #   @!macro atomic_boolean_method_make_true
-
-      # @!method make_false
-      #   @!macro atomic_boolean_method_make_false
-    end
-
-    # @!macro atomic_boolean
-    class AtomicBoolean < CAtomicBoolean
-    end
-
-  else
-
-    # @!macro atomic_boolean
-    class AtomicBoolean < MutexAtomicBoolean
-    end
   end
 end

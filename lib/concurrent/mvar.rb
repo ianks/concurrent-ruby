@@ -1,6 +1,4 @@
-require 'concurrent/dereferenceable'
-require 'concurrent/atomic/condition'
-require 'concurrent/atomic/event'
+require 'concurrent/concern/dereferenceable'
 
 module Concurrent
 
@@ -26,16 +24,19 @@ module Concurrent
   # Note that unlike the original Haskell paper, our `#take` is blocking. This is how
   # Haskell and Scala do it today.
   #
-  # **See Also:**
+  # @!macro copy_options
+  #
+  # ## See Also
   #
   # 1. P. Barth, R. Nikhil, and Arvind. [M-Structures: Extending a parallel, non- strict, functional language with state](http://dl.acm.org/citation.cfm?id=652538). In Proceedings of the 5th
-  # ACM Conference on Functional Programming Languages and Computer Architecture (FPCA), 1991.
+  #    ACM Conference on Functional Programming Languages and Computer Architecture (FPCA), 1991.
+  #
   # 2. S. Peyton Jones, A. Gordon, and S. Finne. [Concurrent Haskell](http://dl.acm.org/citation.cfm?id=237794).
-  # In Proceedings of the 23rd Symposium on Principles of Programming Languages
-  # (PoPL), 1996.
+  #    In Proceedings of the 23rd Symposium on Principles of Programming Languages
+  #    (PoPL), 1996.
   class MVar
 
-    include Dereferenceable
+    include Concern::Dereferenceable
 
     # Unique value that represents that an `MVar` was empty
     EMPTY = Object.new
@@ -47,22 +48,13 @@ module Concurrent
     # Create a new `MVar`, either empty or with an initial value.
     #
     # @param [Hash] opts the options controlling how the future will be processed
-    # @option opts [Boolean] :operation (false) when `true` will execute the
-    #   future on the global operation pool (for long-running operations), when
-    #   `false` will execute the future on the global task pool (for
-    #   short-running tasks)
-    # @option opts [object] :executor when provided will run all operations on
-    #   this executor rather than the global thread pool (overrides :operation)
-    # @option opts [String] :dup_on_deref (false) call `#dup` before returning the data
-    # @option opts [String] :freeze_on_deref (false) call `#freeze` before
-    #   returning the data
-    # @option opts [String] :copy_on_deref (nil) call the given `Proc` passing
-    #   the internal value and returning the value returned from the proc
+    #
+    # @!macro deref_options
     def initialize(value = EMPTY, opts = {})
       @value = value
       @mutex = Mutex.new
-      @empty_condition = Condition.new
-      @full_condition = Condition.new
+      @empty_condition = ConditionVariable.new
+      @full_condition = ConditionVariable.new
       set_deref_options(opts)
     end
 
@@ -188,7 +180,7 @@ module Concurrent
 
     # Returns if the `MVar` currently contains a value.
     def full?
-      not empty?
+      !empty?
     end
 
     private
@@ -210,12 +202,17 @@ module Concurrent
     end
 
     def wait_while(condition, timeout)
-      remaining = Condition::Result.new(timeout)
-      while yield && remaining.can_wait?
-        remaining = condition.wait(@mutex, remaining.remaining_time)
+      if timeout.nil?
+        while yield
+          condition.wait(@mutex)
+        end
+      else
+        stop = Concurrent.monotonic_time + timeout
+        while yield && timeout > 0.0
+          condition.wait(@mutex, timeout)
+          timeout = stop - Concurrent.monotonic_time
+        end
       end
     end
-
   end
-
 end

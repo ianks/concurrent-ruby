@@ -106,27 +106,80 @@ module Concurrent
       expect(t2.value).to eq 0
     end
 
-    it 'provides isolation' do
+    it 'provides weak isolation' do
       t = TVar.new(0)
+
+      a = CountDownLatch.new
+      b = CountDownLatch.new
 
       Thread.new do
         Concurrent::atomically do
-          t1.value = 1
-          sleep(1)
+          t.value = 1
+          a.count_down
+          b.wait
+          Concurrent.leave_transaction
         end
       end
 
-      sleep(0.5)
+      Concurrent::atomically do
+        a.wait
+        expect(t.value).to eq 0
+        b.count_down
+        Concurrent.leave_transaction
+      end
+    end
 
+    it 'is implemented with lazy writes' do
+      t = TVar.new(0)
+
+      a = CountDownLatch.new
+      b = CountDownLatch.new
+
+      Thread.new do
+        Concurrent::atomically do
+          t.value = 1
+          a.count_down
+          b.wait
+        end
+      end
+
+      a.wait
       expect(t.value).to eq 0
+      b.count_down
     end
 
     it 'nests' do
+      t = TVar.new(0)
+
       Concurrent::atomically do
+        expect(t.value).to eq 0
+        t.value = 1
         Concurrent::atomically do
+          expect(t.value).to eq 1
+          t.value = 2
           Concurrent::atomically do
+            expect(t.value).to eq 2
+            t.value = 3
           end
+          expect(t.value).to eq 3
+          t.value = 4
         end
+        expect(t.value).to eq 4
+        t.value = 5
+      end
+
+      expect(t.value).to eq 5
+    end
+
+    it 'reflects transactional writes from within the same transaction' do
+      t = TVar.new(0)
+
+      Concurrent::atomically do
+        expect(t.value).to eq 0
+        t.value = 14
+        expect(t.value).to eq 14
+        t.value = 2
+        expect(t.value).to eq 2
       end
     end
 
@@ -136,6 +189,26 @@ module Concurrent
 
     it 'raises an exception outside an #atomically block' do
       expect { Concurrent::abort_transaction }.to raise_error(Concurrent::Transaction::AbortError)
+    end
+
+  end
+
+  describe '#leave_transaction' do
+
+    it 'raises an exception outside an #atomically block' do
+      expect { Concurrent::leave_transaction }.to raise_error(Concurrent::Transaction::LeaveError)
+    end
+
+    it 'neither commits nor aborts a transaction' do
+      t = TVar.new(0)
+
+      Concurrent::atomically do
+        expect(t.value).to eq 0
+        t.value = 14
+        Concurrent::leave_transaction
+      end
+
+      expect(t.value).to eq 0
     end
 
   end

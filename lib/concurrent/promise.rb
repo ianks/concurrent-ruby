@@ -1,8 +1,7 @@
 require 'thread'
-
+require 'concurrent/errors'
 require 'concurrent/ivar'
-require 'concurrent/obligation'
-require 'concurrent/executor/executor_options'
+require 'concurrent/executor/executor'
 
 module Concurrent
 
@@ -55,6 +54,8 @@ module Concurrent
   # seconds to block.
   #
   # Promises run on the global thread pool.
+  #
+  # @!macro copy_options
   #
   # ### Examples
   #
@@ -183,7 +184,6 @@ module Concurrent
   # - `rescue { |reason| ... }` is the same as `then(Proc.new { |reason| ... } )`
   # - `rescue` is aliased by `catch` and `on_error`
   class Promise < IVar
-    include ExecutorOptions
 
     # Initialize a new Promise with the provided options.
     #
@@ -205,18 +205,7 @@ module Concurrent
     # @see http://promises-aplus.github.io/promises-spec/
     def initialize(opts = {}, &block)
       opts.delete_if { |k, v| v.nil? }
-      super(IVar::NO_VALUE, opts)
-
-      @executor = get_executor_from(opts) || Concurrent.global_io_executor
-      @args = get_arguments_from(opts)
-
-      @parent = opts.fetch(:parent) { nil }
-      @on_fulfill = opts.fetch(:on_fulfill) { Proc.new { |result| result } }
-      @on_reject = opts.fetch(:on_reject) { Proc.new { |reason| raise reason } }
-
-      @promise_body = block || Proc.new { |result| result }
-      @state = :unscheduled
-      @children = []
+      super(IVar::NO_VALUE, opts.merge(__promise_body_from_block__: block), &nil)
     end
 
     # Create a new `Promise` and fulfill it immediately.
@@ -268,7 +257,7 @@ module Concurrent
     def set(value = IVar::NO_VALUE, &block)
       raise PromiseExecutionError.new('supported only on root promise') unless root?
       check_for_block_or_value!(block_given?, value)
-      mutex.synchronize do
+      synchronize do
         if @state != :unscheduled
           raise MultipleAssignmentError
         else
@@ -321,7 +310,7 @@ module Concurrent
         on_reject: rescuer
       )
 
-      mutex.synchronize do
+      synchronize do
         child.state = :pending if @state == :pending
         child.on_fulfill(apply_deref_options(@value)) if @state == :fulfilled
         child.on_reject(@reason) if @state == :rejected
@@ -449,6 +438,21 @@ module Concurrent
 
     protected
 
+    def ns_initialize(value, opts)
+      super
+
+      @executor = Executor.executor_from_options(opts) || Concurrent.global_io_executor
+      @args = get_arguments_from(opts)
+
+      @parent = opts.fetch(:parent) { nil }
+      @on_fulfill = opts.fetch(:on_fulfill) { Proc.new { |result| result } }
+      @on_reject = opts.fetch(:on_reject) { Proc.new { |reason| raise reason } }
+
+      @promise_body = opts[:__promise_body_from_block__] || Proc.new { |result| result }
+      @state = :unscheduled
+      @children = []
+    end
+
     # Aggregate a collection of zero or more promises under a composite promise,
     # execute the aggregated promises and collect them into a standard Ruby array,
     # call the given Ruby `Ennnumerable` predicate (such as `any?`, `all?`, `none?`,
@@ -474,7 +478,7 @@ module Concurrent
 
     # @!visibility private
     def set_pending
-      mutex.synchronize do
+      synchronize do
         @state = :pending
         @children.each { |c| c.set_pending }
       end
@@ -505,7 +509,7 @@ module Concurrent
 
     # @!visibility private
     def complete(success, value, reason)
-      children_to_notify = mutex.synchronize do
+      children_to_notify = synchronize do
         set_state!(success, value, reason)
         @children.dup
       end
@@ -530,7 +534,7 @@ module Concurrent
 
     # @!visibility private
     def synchronized_set_state!(success, value, reason)
-      mutex.synchronize { set_state!(success, value, reason) }
+      synchronize { set_state!(success, value, reason) }
     end
   end
 end

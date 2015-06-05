@@ -1,19 +1,19 @@
 module Concurrent
   module Synchronization
     class MonitorObject < MutexObject
-      def initialize
-        @__lock__do_not_use_directly      = ::Monitor.new
-        @__condition__do_not_use_directly = @__lock__do_not_use_directly.new_cond
+      def initialize(*args, &block)
+        @__lock__      = ::Monitor.new
+        @__condition__ = @__lock__.new_cond
       end
+
+      protected
 
       def synchronize
-        @__lock__do_not_use_directly.synchronize { yield }
+        @__lock__.synchronize { yield }
       end
 
-      private
-
       def ns_wait(timeout = nil)
-        @__condition__do_not_use_directly.wait timeout
+        @__condition__.wait timeout
         self
       end
     end

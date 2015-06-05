@@ -1,8 +1,9 @@
 require 'thread'
 
 require 'concurrent/errors'
-require 'concurrent/obligation'
-require 'concurrent/observable'
+require 'concurrent/collection/copy_on_write_observer_set'
+require 'concurrent/concern/obligation'
+require 'concurrent/concern/observable'
 require 'concurrent/synchronization'
 
 module Concurrent
@@ -26,22 +27,27 @@ module Concurrent
   # when the values they depend on are ready you want `dataflow`. `IVar` is
   # generally a low-level primitive.
   #
-  # **See Also:**
+  # ## Examples
   #
-  # * For the theory: Arvind, R. Nikhil, and K. Pingali.
-  #     [I-Structures: Data structures for parallel computing](http://dl.acm.org/citation.cfm?id=69562).
-  #     In Proceedings of Workshop on Graph Reduction, 1986.
-  # * For recent application:
-  #     [DataDrivenFuture in Habanero Java from Rice](http://www.cs.rice.edu/~vs3/hjlib/doc/edu/rice/hj/api/HjDataDrivenFuture.html).
+  # Create, set and get an `IVar`
   #
-  # @example Create, set and get an `IVar`
-  #   ivar = Concurrent::IVar.new
-  #   ivar.set 14
-  #   ivar.get #=> 14
-  #   ivar.set 2 # would now be an error
+  # ```ruby
+  # ivar = Concurrent::IVar.new
+  # ivar.set 14
+  # ivar.get #=> 14
+  # ivar.set 2 # would now be an error
+  # ```
+  #
+  # ## See Also
+  #
+  # 1. For the theory: Arvind, R. Nikhil, and K. Pingali.
+  #    [I-Structures: Data structures for parallel computing](http://dl.acm.org/citation.cfm?id=69562).
+  #    In Proceedings of Workshop on Graph Reduction, 1986.
+  # 2. For recent application:
+  #    [DataDrivenFuture in Habanero Java from Rice](http://www.cs.rice.edu/~vs3/hjlib/doc/edu/rice/hj/api/HjDataDrivenFuture.html).
   class IVar < Synchronization::Object
-    include Obligation
-    include Observable
+    include Concern::Obligation
+    include Concern::Observable
 
     # @!visibility private
     NO_VALUE = Object.new # :nodoc:
@@ -56,14 +62,12 @@ module Concurrent
     #   returning the data
     # @option opts [String] :copy_on_deref (nil) call the given `Proc` passing
     #   the internal value and returning the value returned from the proc
-    def initialize(value = NO_VALUE, opts = {})
+    def initialize(value = NO_VALUE, opts = {}, &block)
+      if value != NO_VALUE && block_given?
+        raise ArgumentError.new('provide only a value or a block')
+      end
       super(&nil)
-      init_obligation(self)
-      self.observers = CopyOnWriteObserverSet.new
-      set_deref_options(opts)
-      @state = :pending
-
-      set(value) unless value == NO_VALUE
+      synchronize { ns_initialize(value, opts, &block) }
     end
 
     # Add an observer on this object that will receive notification on update.
@@ -86,7 +90,7 @@ module Concurrent
         func = :call
       end
 
-      mutex.synchronize do
+      synchronize do
         if event.set?
           direct_notification = true
         else
@@ -115,10 +119,13 @@ module Concurrent
 
       begin
         value = yield if block_given?
-        complete(true, value, nil)
+        complete_without_notification(true, value, nil)
       rescue => ex
-        complete(false, nil, ex)
+        complete_without_notification(false, nil, ex)
       end
+
+      notify_observers(self.value, reason)
+      self
     end
 
     # @!macro [attach] ivar_fail_method
@@ -148,16 +155,51 @@ module Concurrent
     protected
 
     # @!visibility private
-    def complete(success, value, reason) # :nodoc:
-      mutex.synchronize do
-        raise MultipleAssignmentError if [:fulfilled, :rejected].include? @state
-        set_state(success, value, reason)
-        event.set
-      end
+    def ns_initialize(value, opts)
+      value = yield if block_given?
+      init_obligation(self)
+      self.observers = Collection::CopyOnWriteObserverSet.new
+      set_deref_options(opts)
 
-      time = Time.now
-      observers.notify_and_delete_observers{ [time, self.value, reason] }
+      if value == NO_VALUE
+        @state = :pending
+      else
+        ns_complete_without_notification(true, value, nil)
+      end
+    end
+
+    # @!visibility private
+    def safe_execute(task, args = [])
+      if compare_and_set_state(:processing, :pending)
+        success, val, reason = SafeTaskExecutor.new(task, rescue_exception: true).execute(*@args)
+        complete(success, val, reason)
+        yield(success, val, reason) if block_given?
+      end
+    end
+
+    # @!visibility private
+    def complete(success, value, reason)
+      complete_without_notification(success, value, reason)
+      notify_observers(self.value, reason)
       self
+    end
+
+    # @!visibility private
+    def complete_without_notification(success, value, reason)
+      synchronize { ns_complete_without_notification(success, value, reason) }
+      self
+    end
+
+    # @!visibility private
+    def notify_observers(value, reason)
+      observers.notify_and_delete_observers{ [Time.now, value, reason] }
+    end
+
+    # @!visibility private
+    def ns_complete_without_notification(success, value, reason)
+      raise MultipleAssignmentError if [:fulfilled, :rejected].include? @state
+      set_state(success, value, reason)
+      event.set
     end
 
     # @!visibility private

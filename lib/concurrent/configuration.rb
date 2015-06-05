@@ -1,16 +1,18 @@
 require 'thread'
 require 'concurrent/atomics'
 require 'concurrent/errors'
-require 'concurrent/at_exit'
 require 'concurrent/executors'
-require 'concurrent/utility/processor_count'
+require 'concurrent/concern/deprecation'
+require 'concurrent/concern/logging'
+require 'concurrent/utility/at_exit'
+require 'concurrent/utility/processor_counter'
 
 module Concurrent
-  extend Logging
+  extend Concern::Logging
+  extend Concern::Deprecation
 
   # Suppresses all output when used for logging.
   NULL_LOGGER = lambda { |level, progname, message = nil, &block| }
-  private_constant :NULL_LOGGER
 
   # @!visibility private
   GLOBAL_LOGGER = AtomicReference.new(NULL_LOGGER)
@@ -60,21 +62,21 @@ module Concurrent
   end
 
   def self.disable_executor_auto_termination!
-    warn '[DEPRECATED] Use Concurrent.disable_at_exit_hooks! instead'
+    deprecated_method 'disable_executor_auto_termination!', 'disable_at_exit_hooks!'
     disable_at_exit_hooks!
   end
 
   # @return [true,false]
   # @see .disable_executor_auto_termination!
   def self.disable_executor_auto_termination?
-    warn '[DEPRECATED] Use Concurrent::AtExit.enabled? instead'
+    deprecated_method 'disable_executor_auto_termination?', 'Concurrent::AtExit.enabled?'
     AtExit.enabled?
   end
 
   # terminates all pools and blocks until they are terminated
   # @see .disable_executor_auto_termination!
   def self.terminate_pools!
-    warn '[DEPRECATED] Use Concurrent::AtExit.run instead'
+    deprecated_method 'terminate_pools!', 'Concurrent::AtExit.run'
     AtExit.run
   end
 
@@ -105,13 +107,23 @@ module Concurrent
     GLOBAL_TIMER_SET.value
   end
 
+  # General access point to global executors.
+  # @param [Symbol, Executor] executor_identifier symbols:
+  #   - :fast - {Concurrent.global_fast_executor}
+  #   - :io - {Concurrent.global_io_executor}
+  #   - :immediate - {Concurrent.global_immediate_executor}
+  # @return [Executor]
+  def self.executor(executor_identifier)
+    Executor.executor(executor_identifier)
+  end
+
   def self.new_fast_executor(opts = {})
     FixedThreadPool.new(
         [2, Concurrent.processor_count].max,
         auto_terminate:  opts.fetch(:auto_terminate, true),
         idletime:        60, # 1 minute
         max_queue:       0, # unlimited
-        fallback_policy: :caller_runs # shouldn't matter -- 0 max queue
+        fallback_policy: :abort # shouldn't matter -- 0 max queue
     )
   end
 
@@ -123,12 +135,13 @@ module Concurrent
         auto_terminate:  opts.fetch(:auto_terminate, true),
         idletime:        60, # 1 minute
         max_queue:       0, # unlimited
-        fallback_policy: :caller_runs # shouldn't matter -- 0 max queue
+        fallback_policy: :abort # shouldn't matter -- 0 max queue
     )
   end
 
   # A gem-level configuration object.
   class Configuration
+    include Concern::Deprecation
 
     # Create a new configuration object.
     def initialize
@@ -137,7 +150,7 @@ module Concurrent
     # if assigned to {#logger}, it will log nothing.
     # @deprecated Use Concurrent::NULL_LOGGER instead
     def no_logger
-      warn '[DEPRECATED] Use Concurrent::NULL_LOGGER instead'
+      deprecated_method 'Concurrent.configuration.no_logger', 'Concurrent::NULL_LOGGER'
       NULL_LOGGER
     end
 
@@ -146,7 +159,7 @@ module Concurrent
     #
     # @deprecated Use Concurrent.global_logger instead
     def logger
-      warn '[DEPRECATED] Use Concurrent.global_logger instead'
+      deprecated_method 'Concurrent.configuration.logger', 'Concurrent.global_logger'
       Concurrent.global_logger.value
     end
 
@@ -155,32 +168,32 @@ module Concurrent
     #
     # @deprecated Use Concurrent.global_logger instead
     def logger=(value)
-      warn '[DEPRECATED] Use Concurrent.global_logger instead'
+      deprecated_method 'Concurrent.configuration.logger=', 'Concurrent.global_logger='
       Concurrent.global_logger = value
     end
 
     # @deprecated Use Concurrent.global_io_executor instead
     def global_task_pool
-      warn '[DEPRECATED] Use Concurrent.global_io_executor instead'
+      deprecated_method 'Concurrent.configuration.global_task_pool', 'Concurrent.global_io_executor'
       Concurrent.global_io_executor
     end
 
     # @deprecated Use Concurrent.global_fast_executor instead
     def global_operation_pool
-      warn '[DEPRECATED] Use Concurrent.global_fast_executor instead'
+      deprecated_method 'Concurrent.configuration.global_operation_pool', 'Concurrent.global_fast_executor'
       Concurrent.global_fast_executor
     end
 
     # @deprecated Use Concurrent.global_timer_set instead
     def global_timer_set
-      warn '[DEPRECATED] Use Concurrent.global_timer_set instead'
+      deprecated_method 'Concurrent.configuration.global_timer_set', 'Concurrent.global_timer_set'
       Concurrent.global_timer_set
     end
 
     # @deprecated Replacing global thread pools is deprecated.
     #   Use the :executor constructor option instead.
     def global_task_pool=(executor)
-      warn '[DEPRECATED] Replacing global thread pools is deprecated. Use the :executor constructor option instead.'
+      deprecated 'Replacing global thread pools is deprecated. Use the :executor constructor option instead.'
       GLOBAL_IO_EXECUTOR.reconfigure { executor } or
           raise ConfigurationError.new('global task pool was already set')
     end
@@ -188,32 +201,32 @@ module Concurrent
     # @deprecated Replacing global thread pools is deprecated.
     #   Use the :executor constructor option instead.
     def global_operation_pool=(executor)
-      warn '[DEPRECATED] Replacing global thread pools is deprecated. Use the :executor constructor option instead.'
+      deprecated 'Replacing global thread pools is deprecated. Use the :executor constructor option instead.'
       GLOBAL_FAST_EXECUTOR.reconfigure { executor } or
           raise ConfigurationError.new('global operation pool was already set')
     end
 
     # @deprecated Use Concurrent.new_io_executor instead
     def new_task_pool
-      warn '[DEPRECATED] Use Concurrent.new_io_executor instead'
+      deprecated_method 'Concurrent.configuration.new_task_pool', 'Concurrent.new_io_executor'
       Concurrent.new_io_executor
     end
 
     # @deprecated Use Concurrent.new_fast_executor instead
     def new_operation_pool
-      warn '[DEPRECATED] Use Concurrent.new_fast_executor instead'
+      deprecated_method 'Concurrent.configuration.new_operation_pool', 'Concurrent.new_fast_executor'
       Concurrent.new_fast_executor
     end
 
     # @deprecated Use Concurrent.disable_auto_termination_of_global_executors! instead
     def auto_terminate=(value)
-      warn '[DEPRECATED] Use Concurrent.disable_auto_termination_of_global_executors! instead'
+      deprecated_method 'Concurrent.configuration.auto_terminate=', 'Concurrent.disable_auto_termination_of_global_executors!'
       Concurrent.disable_auto_termination_of_global_executors! if !value
     end
 
     # @deprecated Use Concurrent.auto_terminate_global_executors? instead
     def auto_terminate
-      warn '[DEPRECATED] Use Concurrent.auto_terminate_global_executors? instead'
+      deprecated_method 'Concurrent.configuration.auto_terminate', 'Concurrent.auto_terminate_global_executors?'
       Concurrent.auto_terminate_global_executors?
     end
   end

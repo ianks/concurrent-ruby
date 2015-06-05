@@ -1,22 +1,89 @@
 require 'thread'
-
-require 'concurrent/dereferenceable'
-require 'concurrent/observable'
-require 'concurrent/executor/executor_options'
-require 'concurrent/utility/timeout'
-require 'concurrent/logging'
+require 'concurrent/collection/copy_on_write_observer_set'
+require 'concurrent/concern/dereferenceable'
+require 'concurrent/concern/observable'
+require 'concurrent/concern/logging'
+require 'concurrent/executor/executor'
+require 'concurrent/concern/deprecation'
 
 module Concurrent
 
-  # {include:file:doc/agent.md}
+  # `Agent`s are inspired by [Clojure's](http://clojure.org/) [agent](http://clojure.org/agents) function. An `Agent` is a single atomic value that represents an identity. The current value of the `Agent` can be requested at any time (`deref`). Each `Agent` has a work queue and operates on the global thread pool (see below). Consumers can `post` code blocks to the `Agent`. The code block (function) will receive the current value of the `Agent` as its sole parameter. The return value of the block will become the new value of the `Agent`. `Agent`s support two error handling modes: fail and continue. A good example of an `Agent` is a shared incrementing counter, such as the score in a video game. 
+  # 
+  # An `Agent` must be initialize with an initial value. This value is always accessible via the `value` (or `deref`) methods. Code blocks sent to the `Agent` will be processed in the order received. As each block is processed the current value is updated with the result from the block. This update is an atomic operation so a `deref` will never block and will always return the current value. 
+  # 
+  # When an `Agent` is created it may be given an optional `validate` block and zero or more `rescue` blocks. When a new value is calculated the value will be checked against the validator, if present. If the validator returns `true` the new value will be accepted. If it returns `false` it will be rejected. If a block raises an exception during execution the list of `rescue` blocks will be seacrhed in order until one matching the current exception is found. That `rescue` block will then be called an passed the exception object. If no matching `rescue` block is found, or none were configured, then the exception will be suppressed. 
+  # 
+  # `Agent`s also implement Ruby's [Observable](http://ruby-doc.org/stdlib-2.0/libdoc/observer/rdoc/Observable.html). Code that observes an `Agent` will receive a callback with the new value any time the value is changed. 
+  #
+  # @!macro copy_options
+  # 
+  # @example Simple Example
+  # 
+  #   require 'concurrent'
+  #   
+  #   score = Concurrent::Agent.new(10)
+  #   score.value #=> 10
+  #   
+  #   score << proc{|current| current + 100 }
+  #   sleep(0.1)
+  #   score.value #=> 110
+  #   
+  #   score << proc{|current| current * 2 }
+  #   sleep(0.1)
+  #   score.value #=> 220
+  #   
+  #   score << proc{|current| current - 50 }
+  #   sleep(0.1)
+  #   score.value #=> 170
+  # 
+  # @example With Validation and Error Handling
+  # 
+  #   score = Concurrent::Agent.new(0).validate{|value| value <= 1024 }.
+  #             rescue(NoMethodError){|ex| puts "Bam!" }.
+  #             rescue(ArgumentError){|ex| puts "Pow!" }.
+  #             rescue{|ex| puts "Boom!" }
+  #   score.value #=> 0
+  #   
+  #   score << proc{|current| current + 2048 }
+  #   sleep(0.1)
+  #   score.value #=> 0
+  #   
+  #   score << proc{|current| raise ArgumentError }
+  #   sleep(0.1)
+  #   #=> puts "Pow!"
+  #   score.value #=> 0
+  #   
+  #   score << proc{|current| current + 100 }
+  #   sleep(0.1)
+  #   score.value #=> 100
+  # 
+  # @example With Observation
+  # 
+  #   bingo = Class.new{
+  #     def update(time, score)
+  #       puts "Bingo! [score: #{score}, time: #{time}]" if score >= 100
+  #     end
+  #   }.new
+  #   
+  #   score = Concurrent::Agent.new(0)
+  #   score.add_observer(bingo)
+  #   
+  #   score << proc{|current| sleep(0.1); current += 30 }
+  #   score << proc{|current| sleep(0.1); current += 30 }
+  #   score << proc{|current| sleep(0.1); current += 30 }
+  #   score << proc{|current| sleep(0.1); current += 30 }
+  #   
+  #   sleep(1)
+  #   #=> Bingo! [score: 120, time: 2013-07-22 21:26:08 -0400]
   #
   # @!attribute [r] timeout
   #   @return [Fixnum] the maximum number of seconds before an update is cancelled
   class Agent
-    include Dereferenceable
-    include Observable
-    include ExecutorOptions
-    include Logging
+    include Concern::Dereferenceable
+    include Concern::Observable
+    include Concern::Logging
+    include Concern::Deprecation
 
     attr_reader :timeout, :io_executor, :fast_executor
 
@@ -29,10 +96,10 @@ module Concurrent
       @value                = initial
       @rescuers             = []
       @validator            = Proc.new { |result| true }
-      self.observers        = CopyOnWriteObserverSet.new
+      self.observers        = Collection::CopyOnWriteObserverSet.new
       @serialized_execution = SerializedExecution.new
-      @io_executor          = get_executor_from(opts) || Concurrent.global_io_executor
-      @fast_executor        = get_executor_from(opts) || Concurrent.global_fast_executor
+      @io_executor          = Executor.executor_from_options(opts) || Concurrent.global_io_executor
+      @fast_executor        = Executor.executor_from_options(opts) || Concurrent.global_fast_executor
       init_mutex
       set_deref_options(opts)
     end
@@ -66,6 +133,7 @@ module Concurrent
       end
       self
     end
+
     alias_method :catch, :rescue
     alias_method :on_error, :rescue
 
@@ -89,6 +157,7 @@ module Concurrent
       end
       self
     end
+
     alias_method :validates, :validate
     alias_method :validate_with, :validate
     alias_method :validates_with, :validate
@@ -108,7 +177,7 @@ module Concurrent
     # Update the current value with the result of the given block fast,
     # block can do blocking calls
     #
-    # @param [Fixnum, nil] timeout maximum number of seconds before an update is cancelled
+    # @param [Fixnum, nil] timeout [DEPRECATED] maximum number of seconds before an update is cancelled
     #
     # @yield the fast to be performed with the current value in order to calculate
     #   the new value
@@ -116,12 +185,22 @@ module Concurrent
     # @yieldreturn [Object] the new value
     # @return [true, nil] nil when no block is given
     def post_off(timeout = nil, &block)
-      block = if timeout
-                lambda { |value| Concurrent::timeout(timeout) { block.call(value) } }
-              else
-                block
-              end
-      post_on(@io_executor, &block)
+      task = if timeout
+               deprecated 'post_off with option timeout options is deprecated and will be removed'
+               lambda do |value|
+                 future = Future.execute do
+                   block.call(value)
+                 end
+                 if future.wait(timeout)
+                   future.value!
+                 else
+                   raise Concurrent::TimeoutError
+                 end
+               end
+             else
+               block
+             end
+      post_on(@io_executor, &task)
     end
 
     # Update the current value with the result of the given block fast,

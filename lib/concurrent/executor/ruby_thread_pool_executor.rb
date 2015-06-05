@@ -1,18 +1,18 @@
 require 'thread'
 
 require 'concurrent/atomic/event'
-require 'concurrent/executor/executor'
+require 'concurrent/concern/logging'
+require 'concurrent/executor/executor_service'
 require 'concurrent/utility/monotonic_time'
 
 module Concurrent
 
   # @!macro thread_pool_executor
   # @!macro thread_pool_options
-  class RubyThreadPoolExecutor
-    include RubyExecutor
+  class RubyThreadPoolExecutor < RubyExecutorService
 
     # Default maximum number of threads that will be created in the pool.
-    DEFAULT_MAX_POOL_SIZE      = 2**15 # 32768
+    DEFAULT_MAX_POOL_SIZE      = 2**13 # 8192
 
     # Default minimum number of threads that will be retained in the pool.
     DEFAULT_MIN_POOL_SIZE      = 0
@@ -71,19 +71,78 @@ module Concurrent
     #
     # @see http://docs.oracle.com/javase/7/docs/api/java/util/concurrent/ThreadPoolExecutor.html
     def initialize(opts = {})
+      super(opts)
+    end
+
+    # @!macro executor_service_method_can_overflow_question
+    def can_overflow?
+      synchronize { ns_limited_queue? }
+    end
+
+    # The number of threads currently in the pool.
+    #
+    # @return [Integer] the length
+    def length
+      synchronize { @pool.length }
+    end
+
+    # The number of tasks in the queue awaiting execution.
+    #
+    # @return [Integer] the queue_length
+    def queue_length
+      synchronize { @queue.length }
+    end
+
+    # Number of tasks that may be enqueued before reaching `max_queue` and rejecting
+    # new tasks. A value of -1 indicates that the queue may grow without bound.
+    #
+    # @return [Integer] the remaining_capacity
+    def remaining_capacity
+      synchronize do
+        if ns_limited_queue?
+          @max_queue - @queue.length
+        else
+          -1
+        end
+      end
+    end
+
+    # @api private
+    def remove_busy_worker(worker)
+      synchronize { ns_remove_busy_worker worker }
+    end
+
+    # @api private
+    def ready_worker(worker)
+      synchronize { ns_ready_worker worker }
+    end
+
+    # @api private
+    def worker_not_old_enough(worker)
+      synchronize { ns_worker_not_old_enough worker }
+    end
+
+    # @api private
+    def worker_died(worker)
+      synchronize { ns_worker_died worker }
+    end
+
+    protected
+
+    # @!visibility private
+    def ns_initialize(opts)
       @min_length      = opts.fetch(:min_threads, DEFAULT_MIN_POOL_SIZE).to_i
       @max_length      = opts.fetch(:max_threads, DEFAULT_MAX_POOL_SIZE).to_i
       @idletime        = opts.fetch(:idletime, DEFAULT_THREAD_IDLETIMEOUT).to_i
       @max_queue       = opts.fetch(:max_queue, DEFAULT_MAX_QUEUE_SIZE).to_i
       @fallback_policy = opts.fetch(:fallback_policy, opts.fetch(:overflow_policy, :abort))
-      warn '[DEPRECATED] :overflow_policy is deprecated terminology, please use :fallback_policy instead' if opts.has_key?(:overflow_policy)
+      raise ArgumentError.new("#{@fallback_policy} is not a valid fallback policy") unless FALLBACK_POLICIES.include?(@fallback_policy)
+      deprecated ':overflow_policy is deprecated terminology, please use :fallback_policy instead' if opts.has_key?(:overflow_policy)
 
       raise ArgumentError.new('max_threads must be greater than zero') if @max_length <= 0
       raise ArgumentError.new('min_threads cannot be less than zero') if @min_length < 0
-      raise ArgumentError.new("#{fallback_policy} is not a valid fallback policy") unless FALLBACK_POLICIES.include?(@fallback_policy)
       raise ArgumentError.new('min_threads cannot be more than max_threads') if min_length > max_length
 
-      init_executor
       self.auto_terminate = opts.fetch(:auto_terminate, true)
 
       @pool                 = [] # all workers
@@ -98,65 +157,12 @@ module Concurrent
       @next_gc_time = Concurrent.monotonic_time + @gc_interval
     end
 
-    # @!macro executor_module_method_can_overflow_question
-    def can_overflow?
-      mutex.synchronize { ns_limited_queue? }
-    end
-
-    # The number of threads currently in the pool.
-    #
-    # @return [Integer] the length
-    def length
-      mutex.synchronize { @pool.length }
-    end
-
-    # The number of tasks in the queue awaiting execution.
-    #
-    # @return [Integer] the queue_length
-    def queue_length
-      mutex.synchronize { @queue.length }
-    end
-
-    # Number of tasks that may be enqueued before reaching `max_queue` and rejecting
-    # new tasks. A value of -1 indicates that the queue may grow without bound.
-    #
-    # @return [Integer] the remaining_capacity
-    def remaining_capacity
-      mutex.synchronize do
-        if ns_limited_queue?
-          @max_queue - @queue.length
-        else
-          -1
-        end
-      end
-    end
-
-    # @api private
-    def remove_busy_worker(worker)
-      mutex.synchronize { ns_remove_busy_worker worker }
-    end
-
-    # @api private
-    def ready_worker(worker)
-      mutex.synchronize { ns_ready_worker worker }
-    end
-
-    # @api private
-    def worker_not_old_enough(worker)
-      mutex.synchronize { ns_worker_not_old_enough worker }
-    end
-
-    # @api private
-    def worker_died(worker)
-      mutex.synchronize { ns_worker_died worker }
-    end
-
-    protected
-
+    # @!visibility private
     def ns_limited_queue?
       @max_queue != 0
     end
 
+    # @!visibility private
     def ns_execute(*args, &task)
       if ns_assign_worker(*args, &task) || ns_enqueue(*args, &task)
         @scheduled_task_count += 1
@@ -170,6 +176,7 @@ module Concurrent
 
     alias_method :execute, :ns_execute
 
+    # @!visibility private
     def ns_shutdown_execution
       if @pool.empty?
         # nothing to do
@@ -185,21 +192,21 @@ module Concurrent
 
     alias_method :shutdown_execution, :ns_shutdown_execution
 
-    # @api private
+    # @!visibility private
     def ns_kill_execution
-      ns_shutdown_execution
-      unless stopped_event.wait(1)
-        @pool.each &:kill
-        @pool.clear
-        @ready.clear
-        # TODO log out unprocessed tasks in queue
-      end
+      # TODO log out unprocessed tasks in queue
+      # TODO try to shutdown first?
+      @pool.each &:kill
+      @pool.clear
+      @ready.clear
     end
 
     alias_method :kill_execution, :ns_kill_execution
 
     # tries to assign task to a worker, tries to get one from @ready or to create new one
     # @return [true, false] if task is assigned to a worker
+    #
+    # @!visibility private
     def ns_assign_worker(*args, &task)
       # keep growing if the pool is not at the minimum yet
       worker = (@ready.pop if @pool.size >= @min_length) || ns_add_busy_worker
@@ -213,6 +220,8 @@ module Concurrent
 
     # tries to enqueue task
     # @return [true, false] if enqueued
+    #
+    # @!visibility private
     def ns_enqueue(*args, &task)
       if !ns_limited_queue? || @queue.size < @max_queue
         @queue << [task, args]
@@ -222,6 +231,7 @@ module Concurrent
       end
     end
 
+    # @!visibility private
     def ns_worker_died(worker)
       ns_remove_busy_worker worker
       replacement_worker = ns_add_busy_worker
@@ -230,6 +240,8 @@ module Concurrent
 
     # creates new worker which has to receive work to do after it's added
     # @return [nil, Worker] nil of max capacity is reached
+    #
+    # @!visibility private
     def ns_add_busy_worker
       return if @pool.size >= @max_length
 
@@ -239,6 +251,8 @@ module Concurrent
     end
 
     # handle ready worker, giving it new job or assigning back to @ready
+    #
+    # @!visibility private
     def ns_ready_worker(worker, success = true)
       @completed_task_count += 1 if success
       task_and_args         = @queue.shift
@@ -255,6 +269,8 @@ module Concurrent
     end
 
     # returns back worker to @ready which was not idle for enough time
+    #
+    # @!visibility private
     def ns_worker_not_old_enough(worker)
       # let's put workers coming from idle_test back to the start (as the oldest worker)
       @ready.unshift(worker)
@@ -262,6 +278,8 @@ module Concurrent
     end
 
     # removes a worker which is not in not tracked in @ready
+    #
+    # @!visibility private
     def ns_remove_busy_worker(worker)
       @pool.delete(worker)
       stopped_event.set if @pool.empty? && !running?
@@ -269,6 +287,8 @@ module Concurrent
     end
 
     # try oldest worker if it is idle for enough time, it's returned back at the start
+    #
+    # @!visibility private
     def ns_prune_pool
       return if @pool.size <= @min_length
 
@@ -279,7 +299,7 @@ module Concurrent
     end
 
     class Worker
-      include Logging
+      include Concern::Logging
 
       def initialize(pool)
         # instance variables accessed only under pool's lock so no need to sync here again
@@ -346,5 +366,6 @@ module Concurrent
       end
     end
 
+    private_constant :Worker
   end
 end

@@ -13,9 +13,11 @@ import org.jruby.runtime.ObjectAllocator;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.runtime.load.Library;
 import org.jruby.runtime.Block;
+import org.jruby.runtime.Visibility;
 import org.jruby.RubyBoolean;
 import org.jruby.RubyNil;
 import org.jruby.runtime.ThreadContext;
+import org.jruby.util.unsafe.UnsafeHolder;
 
 public class SynchronizationLibrary implements Library {
 
@@ -49,17 +51,17 @@ public class SynchronizationLibrary implements Library {
 
         @JRubyMethod
         public IRubyObject initialize(ThreadContext context) {
-            return context.nil;
+            return this;
         }
 
-        @JRubyMethod(name = "synchronize")
+        @JRubyMethod(name = "synchronize", visibility = Visibility.PROTECTED)
         public IRubyObject rubySynchronize(ThreadContext context, Block block) {
             synchronized (this) {
                 return block.yield(context, null);
             }
         }
 
-        @JRubyMethod(name = "ns_wait", optional = 1)
+        @JRubyMethod(name = "ns_wait", optional = 1, visibility = Visibility.PROTECTED)
         public IRubyObject nsWait(ThreadContext context, IRubyObject[] args) {
             Ruby runtime = context.runtime;
             if (args.length > 1) {
@@ -91,16 +93,61 @@ public class SynchronizationLibrary implements Library {
             return this;
         }
 
-        @JRubyMethod(name = "ns_signal")
+        @JRubyMethod(name = "ns_signal", visibility = Visibility.PROTECTED)
         public IRubyObject nsSignal(ThreadContext context) {
             notify();
             return this;
         }
 
-        @JRubyMethod(name = "ns_broadcast")
+        @JRubyMethod(name = "ns_broadcast", visibility = Visibility.PROTECTED)
         public IRubyObject nsBroadcast(ThreadContext context) {
             notifyAll();
             return this;
+        }
+
+        @JRubyMethod(name = "ensure_ivar_visibility!", visibility = Visibility.PROTECTED)
+        public IRubyObject ensureIvarVisibilityBang(ThreadContext context) {
+            if (UnsafeHolder.SUPPORTS_FENCES)
+                UnsafeHolder.storeFence();
+            else
+                anVolatileField = 1;
+            return context.nil;
+        }
+
+        private volatile int anVolatileField = 0; // TODO unused on JAVA8
+        public static final long AN_VOLATILE_FIELD_OFFSET =
+                UnsafeHolder.fieldOffset(JavaObject.class, "anVolatileField");
+
+        @JRubyMethod(name = "instance_variable_get_volatile", visibility = Visibility.PROTECTED)
+        public IRubyObject instanceVariableGetVolatile(ThreadContext context, IRubyObject name) {
+            if (UnsafeHolder.U == null) {
+                synchronized (this) {
+                    return instance_variable_get(context, name);
+                }
+            } else if (UnsafeHolder.SUPPORTS_FENCES) {
+                UnsafeHolder.loadFence();
+                return instance_variable_get(context, name);
+            } else {
+                UnsafeHolder.U.getIntVolatile(this, AN_VOLATILE_FIELD_OFFSET);
+                return instance_variable_get(context, name);
+            }
+        }
+
+        @JRubyMethod(name = "instance_variable_set_volatile", visibility = Visibility.PROTECTED)
+        public IRubyObject InstanceVariableSetVolatile(ThreadContext context, IRubyObject name, IRubyObject value) {
+            if (UnsafeHolder.U == null) {
+                synchronized (this) {
+                    return instance_variable_set(name, value);
+                }
+            } else if (UnsafeHolder.SUPPORTS_FENCES) {
+                IRubyObject result = instance_variable_set(name, value);
+                UnsafeHolder.storeFence();
+                return result;
+            } else {
+                UnsafeHolder.U.putIntVolatile(this, AN_VOLATILE_FIELD_OFFSET, 1);
+                IRubyObject result = instance_variable_set(name, value);
+                return result;
+            }
         }
     }
 }

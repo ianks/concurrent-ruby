@@ -6,8 +6,8 @@ module Concurrent
 
     subject do
       described_class.new(
-          fallback_policy: :discard,
-          gc_interval:     0
+        fallback_policy: :discard,
+        gc_interval:     0
       )
     end
 
@@ -70,16 +70,15 @@ module Concurrent
     end
   end
 
-
-  context 'stress' do
+  context 'stress', notravis: true do
     configurations = [
-        { min_threads:     2,
-          max_threads:     ThreadPoolExecutor::DEFAULT_MAX_POOL_SIZE,
-          auto_terminate:  false,
-          idletime:        0.1, # 1 minute
-          max_queue:       0, # unlimited
-          fallback_policy: :caller_runs, # shouldn't matter -- 0 max queue
-          gc_interval:     0.1 },
+      { min_threads:     2,
+        max_threads:     ThreadPoolExecutor::DEFAULT_MAX_POOL_SIZE,
+        auto_terminate:  false,
+        idletime:        0.1, # 1 minute
+        max_queue:       0, # unlimited
+        fallback_policy: :caller_runs, # shouldn't matter -- 0 max queue
+        gc_interval:     0.1 },
         { min_threads:     2,
           max_threads:     4,
           auto_terminate:  false,
@@ -89,26 +88,23 @@ module Concurrent
           gc_interval:     0.1 }
     ]
 
-
     configurations.each do |config|
       specify do
         pool = RubyThreadPoolExecutor.new(config)
 
-        100.times do
+        10.times do
           count = Concurrent::CountDownLatch.new(100)
           100.times do
             pool.post { count.count_down }
           end
           count.wait
+          sleep 0.01 # let the tasks end after count_down
           expect(pool.length).to be <= [200, config[:max_threads]].min
           if pool.length > [110, config[:max_threads]].min
             puts "ERRORSIZE #{pool.length} max #{config[:max_threads]}"
           end
         end
       end
-
     end
-
-
   end
 end
